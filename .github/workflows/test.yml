@@ -1,0 +1,82 @@
+name: PHP test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    env:
+      ES_TEST_HOST: http://localhost:9200
+
+    strategy:
+      matrix:
+        php-version: [5.6, 7.0, 7.4, 8.0, 8.1, 8.2]
+        os: [ubuntu-latest]
+        es-version: [5.0.2, 5.6.16]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        submodules: true
+
+    - name: Use PHP ${{ matrix.php-version }}
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ matrix.php-version }}
+        extensions: yaml, zip, curl
+      env:
+        COMPOSER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Get composer cache directory
+      id: composercache
+      run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ${{ steps.composercache.outputs.dir }}
+        key: ${{ runner.os }}-php-${{ matrix.php-version }}-${{ hashFiles('**/composer.json') }}
+        restore-keys: ${{ runner.os }}-php-${{ matrix.php-version }}-
+
+    - name: Install dependencies
+      run: |
+        composer install --prefer-dist
+
+    - name: Configure sysctl limits
+      run: |
+        sudo swapoff -a
+        sudo sysctl -w vm.swappiness=1
+        sudo sysctl -w fs.file-max=262144
+        sudo sysctl -w vm.max_map_count=262144
+
+    - name: Runs Elasticsearch ${{ matrix.es-version }}
+      run: |
+        ES_PATH=`pwd`/es
+        mkdir $ES_PATH
+        chmod 0777 $ES_PATH
+        docker network create elastic
+        docker run \
+          --rm \
+          --env "node.name=es1" \
+          --env "cluster.name=docker-elasticsearch" \
+          --env "cluster.routing.allocation.disk.threshold_enabled=false" \
+          --env "path.repo=/es/" \
+          --env "bootstrap.memory_lock=true" \
+          --env "ES_JAVA_OPTS=-Xms1g -Xmx1g" \
+          --env "xpack.security.enabled=false" \
+          --env "http.port=9200" \
+          --ulimit nofile=262144:262144 \
+          --ulimit memlock=-1:-1 \
+          --publish "9200:9200" \
+          --detach \
+          --network elastic \
+          --name="es1" \
+          -v "$ES_PATH:/es/" \
+          docker.elastic.co/elasticsearch/elasticsearch:${{ matrix.es-version }}
+        sleep 10
+        curl http://localhost:9200
+
+    - name: Unit tests
+      run: |
+        vendor/bin/phpunit
